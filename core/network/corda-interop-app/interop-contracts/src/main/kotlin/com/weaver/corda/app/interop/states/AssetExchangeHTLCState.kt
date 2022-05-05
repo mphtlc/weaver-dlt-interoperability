@@ -36,11 +36,11 @@ import net.corda.core.crypto.SecureHash
 data class AssetExchangeHTLCState(
     val lockInfo: AssetLockHTLCData,
     val assetStatePointer: StaticPointer<ContractState>,
-    val locker: Party,
-    val recipient: Party,
+    val lockers: List<Party>,
+    val recipients: List<Party>,
     override val linearId: UniqueIdentifier = UniqueIdentifier(assetStatePointer.hashCode().toString())
 ) : LinearState {
-    override val participants: List<AbstractParty> get() = listOf(locker, recipient)
+    override val participants: List<AbstractParty> get() = lockers + recipients
 }
 
 @CordaSerializable
@@ -70,3 +70,10 @@ data class AssetExchangeTxState(
 ) : LinearState {
     override val participants: List<AbstractParty> get() = listOf(locker)
 }
+
+@CordaSerializable
+data class ObserversAndSigners(
+    val issuer: Party,
+    val observers: List<Party>,
+    val coOwners: List<Party>
+)

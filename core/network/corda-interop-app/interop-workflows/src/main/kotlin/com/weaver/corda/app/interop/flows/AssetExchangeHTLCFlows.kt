@@ -39,6 +39,7 @@ import net.corda.core.utilities.unwrap
 import net.corda.core.serialization.CordaSerializable
 import java.time.Instant
 import java.util.Base64
+import java.security.PublicKey
 
 /**
  * Enum for communicating the role of the responder from initiator flow to
@@ -65,9 +66,10 @@ object LockAssetHTLC {
             val lockInfo: AssetLockHTLCData,
             val assetStateRef: StateAndRef<ContractState>,
             val assetStateDeleteCommand: CommandData,
-            val recipient: Party,
+            val recipients: List<Party>,
             val issuer: Party,
-            val observers: List<Party> = listOf<Party>()
+            val observers: List<Party> = listOf<Party>(),
+            val coOwners: List<Party> = listOf<Party>()
     ) : FlowLogic<Either<Error, UniqueIdentifier>>() {
         /**
          * The call() method captures the logic to create a new [AssetExchangeHTLCState] state in the vault.
@@ -83,25 +85,43 @@ object LockAssetHTLC {
             val assetExchangeHTLCState = AssetExchangeHTLCState(
                 lockInfo,
                 StaticPointer(assetStateRef.ref, assetStateRef.state.data.javaClass), //Get the state pointer from StateAndRef
-                ourIdentity,
-                recipient
+                coOwners,
+                recipients
             )
         
             println("Creating Lock State ${assetExchangeHTLCState}")
             // 2. Build the transaction
             val notary = assetStateRef.state.notary
-            val lockCmd = Command(AssetExchangeHTLCStateContract.Commands.Lock(), 
-                listOf(
-                    assetExchangeHTLCState.locker.owningKey, 
-                    assetExchangeHTLCState.recipient.owningKey
-                )
-            )
-            val assetDeleteCmd = Command(assetStateDeleteCommand, 
-                setOf(
-                    assetExchangeHTLCState.locker.owningKey,
-                    issuer.owningKey
-                ).toList()
-            )
+            var participantKeys: List<PublicKey> = listOf<PublicKey>()
+            for (member in assetExchangeHTLCState.lockers) {
+                participantKeys += member.owningKey
+            }
+            for (member in assetExchangeHTLCState.recipients) {
+                participantKeys += member.owningKey
+            }
+            val lockCmd = Command(AssetExchangeHTLCStateContract.Commands.Lock(), participantKeys)
+
+            var requiredSigners: List<PublicKey> = listOf<PublicKey>()
+            for (member in assetExchangeHTLCState.lockers) {
+                requiredSigners += member.owningKey
+            }
+            requiredSigners += issuer.owningKey
+
+            var isTxSubmittedByCoOwner: Boolean = false
+            coOwners.forEach {
+                val member = it
+                if (member.equals(ourIdentity)) {
+                    // transaction should be submitted by one of the co-owners only
+                    isTxSubmittedByCoOwner = true
+                }
+            }
+            if ((coOwners.size > 0) && (!isTxSubmittedByCoOwner)) {
+                println("Transaction submitter ($ourIdentity) has to be one of the co-owners")
+                throw Exception("Transaction submitter ($ourIdentity) has to be one of the co-owners")
+            }
+
+            val assetDeleteCmd = Command(assetStateDeleteCommand, requiredSigners)
+
             val txBuilder = TransactionBuilder(notary)
                     .addInputState(assetStateRef)
                     .addOutputState(assetExchangeHTLCState, AssetExchangeHTLCStateContract.ID)
@@ -114,12 +134,26 @@ object LockAssetHTLC {
             println("Locker signed transaction.")
             
             var sessions = listOf<FlowSession>()
-            val recipientSession = initiateFlow(recipient)
-            recipientSession.send(ResponderRole.RECIPIENT)
-            sessions += recipientSession
+            // Add a session for each co-owner other than the submitter, for the shared assets
+            coOwners.forEach {
+                if (!ourIdentity.equals(it)) {
+                    val coOwnerSession = initiateFlow(it)
+                    coOwnerSession.send(ResponderRole.LOCKER)
+                    sessions += coOwnerSession
+                }
+            }
+
+            // Add a session for each recipient co-owner, for the shared assets
+            recipients.forEach {
+                if (!ourIdentity.equals(it)) {
+                    val recipientCoOwnerSession = initiateFlow(it)
+                    recipientCoOwnerSession.send(ResponderRole.RECIPIENT)
+                    sessions += recipientCoOwnerSession
+                }
+            }
 
             /// Add issuer session if recipient or locker (i.e. me) is not issuer
-            if (!recipient.equals(issuer) && !ourIdentity.equals(issuer)) {
+            if (!recipients.contains(issuer) && !ourIdentity.equals(issuer)) {
                 val issuerSession = initiateFlow(issuer)
                 issuerSession.send(ResponderRole.ISSUER)
                 sessions += issuerSession
@@ -163,12 +197,25 @@ object LockAssetHTLC {
                     println("Error signing unlock asset transaction by Issuer: ${e.message}\n")
                     return subFlow(ReceiveFinalityFlow(session))
                 }
+            } else if (role == ResponderRole.LOCKER) {
+                val signTransactionFlow = object : SignTransactionFlow(session) {
+                    override fun checkTransaction(stx: SignedTransaction) = requireThat {
+                    }
+                }
+                try {
+                    val txId = subFlow(signTransactionFlow).id
+                    println("Co-owner ($ourIdentity) signed shared asset lock transaction.")
+                    return subFlow(ReceiveFinalityFlow(session, expectedTxId = txId))
+                } catch (e: Exception) {
+                    println("Error signing shared asset lock transaction by co-owner ($ourIdentity): ${e.message}\n")
+                    return subFlow(ReceiveFinalityFlow(session))
+                }
             } else if (role == ResponderRole.RECIPIENT) {
               val signTransactionFlow = object : SignTransactionFlow(session) {
                   override fun checkTransaction(stx: SignedTransaction) = requireThat {
                       "The output State must be AssetExchangeHTLCState" using (stx.tx.outputs.single().data is AssetExchangeHTLCState)
                       val htlcState = stx.tx.outputs.single().data as AssetExchangeHTLCState
-                      "I must be the recipient" using (htlcState.recipient == ourIdentity)
+                      "I must be the recipient" using (htlcState.recipients.contains(ourIdentity))
                   }
               }
               try {
@@ -329,6 +376,46 @@ class GetAssetExchangeHTLCHashPreImageById(
     }
 }
 
+fun tryResolveUpdateOwnerFlowAlternatives(flowName: String, assetStatePointer: StaticPointer<ContractState>,
+    updatedCoOwners: List<Party>) : Either<Error, FlowLogic<ContractState>> {
+
+    return try {
+        var result: Either<Error, FlowLogic<ContractState>> = resolveUpdateOwnerFlow(flowName, listOf(assetStatePointer, updatedCoOwners))
+        when (result) {
+            /*
+                resolveUpdateOwnerFlow(flowName, listOf(assetStatePointer, updatedCoOwners)).fold({
+                    resolveUpdateOwnerFlow(flowName, listOf(assetStatePointer)).fold({
+                        println("Error: Unable to resolve flow $flowName.\n")
+                        Left(Error("Error: Unable to resolve flow $flowName"))
+                    }, {
+                        Right(it)
+                    })
+                }, {
+                    Right(it)
+                })
+            */
+            is Either.Left -> {
+                result = resolveUpdateOwnerFlow(flowName, listOf(assetStatePointer))
+                when (result) {
+                    is Either.Left -> {
+                        println("${result.a.message}")
+                        Left(Error("${result.a.message}"))
+                    }
+                    is Either.Right -> {
+                        Right(result.b)
+                    }
+                }
+            }
+            is Either.Right -> {
+                Right(result.b)
+            }
+        }
+    } catch (e: Exception) {
+        println("${e.message}")
+        Left(Error("${e.message}"))
+    }
+}
+
 /**
  * The ClaimAssetHTLC flow is used to claim a locked asset using HTLC.
  *
@@ -346,7 +433,8 @@ object ClaimAssetHTLC {
             val assetStateCreateCommand: CommandData,
             val updateOwnerFlow: String,
             val issuer: Party,
-            val observers: List<Party> = listOf<Party>()
+            val observers: List<Party> = listOf<Party>(),
+            val coOwners: List<Party> = listOf<Party>()
     ) : FlowLogic<Either<Error, SignedTransaction>>() {
         /**
          * The call() method captures the logic to claim the asset by revealing preimage.
@@ -362,29 +450,44 @@ object ClaimAssetHTLC {
             }, {
                 val inputState = it
                 val assetExchangeHTLCState = inputState.state.data
-                if (!ourIdentity.equals(assetExchangeHTLCState.recipient)) {
+                if (!assetExchangeHTLCState.recipients.contains(ourIdentity)) {
                     println("Error: Only recipient can call claim.")
                     Left(Error("Error: Only recipient can call claim"))        
                 } else {
                     println("Party: ${ourIdentity} ClaimAssetHTLC: ${assetExchangeHTLCState}")
                     val notary = inputState.state.notary
-                    val claimCmd = Command(AssetExchangeHTLCStateContract.Commands.Claim(claimInfo),
-                        listOf(
-                            assetExchangeHTLCState.recipient.owningKey
-                        )
-                    )
-                    val assetCreateCmd = Command(assetStateCreateCommand, 
-                        setOf(
-                            assetExchangeHTLCState.recipient.owningKey,
-                            issuer.owningKey
-                        ).toList()
-                    )
+                    var participantKeys: List<PublicKey> = listOf<PublicKey>()
+                    for (member in assetExchangeHTLCState.recipients) {
+                        participantKeys += member.owningKey
+                    }
+
+                    val claimCmd = Command(AssetExchangeHTLCStateContract.Commands.Claim(claimInfo), participantKeys)
+
+                    var requiredSigners: List<PublicKey> = listOf<PublicKey>()
+                    for (member in assetExchangeHTLCState.recipients) {
+                        requiredSigners += member.owningKey
+                    }
+                    requiredSigners += issuer.owningKey
+
+                    var isTxSubmittedByRecipientCoOwner: Boolean = false
+                    assetExchangeHTLCState.recipients.forEach {
+                        val member = it
+                        if (member.equals(ourIdentity)) {
+                            // transaction should be submitted by one of the recipient co-owners only
+                            isTxSubmittedByRecipientCoOwner = true
+                        }
+                    }
+                    if ((assetExchangeHTLCState.recipients.size > 0) && (!isTxSubmittedByRecipientCoOwner)) {
+                        println("Transaction submitter ($ourIdentity) has to be one of the recipient co-owners")
+                        throw Exception("Transaction submitter ($ourIdentity) has to be one of the recipient co-owners")
+                    }
+                    
+                    val assetCreateCmd = Command(assetStateCreateCommand, requiredSigners)
                     
                     val assetStateContractId = assetExchangeHTLCState.assetStatePointer.resolve(serviceHub).state.contract
                     
-                    resolveUpdateOwnerFlow(updateOwnerFlow, 
-                        listOf(assetExchangeHTLCState.assetStatePointer)
-                    ).fold({
+                    tryResolveUpdateOwnerFlowAlternatives(updateOwnerFlow, assetExchangeHTLCState.assetStatePointer,
+                                assetExchangeHTLCState.recipients).fold({
                         println("Error: Unable to resolve Update Owner Flow.\n")
                         Left(Error("Error: Unable to resolve Update Owner Flow"))
                     }, {
@@ -404,17 +507,32 @@ object ClaimAssetHTLC {
                         println("Recipient signed transaction.")
 
                         var sessions = listOf<FlowSession>()
-                        if (!assetExchangeHTLCState.recipient.equals(issuer)) {
+                        if (!assetExchangeHTLCState.recipients.contains(issuer)) {
                             val issuerSession = initiateFlow(issuer)
                             issuerSession.send(ResponderRole.ISSUER)
                             sessions += issuerSession
                         }
+
+                        // Add a session for each recipeint co-owner other than the submitter, for the shared assets
+                        assetExchangeHTLCState.recipients.forEach {
+                            if (!ourIdentity.equals(it)) {
+                                val recipientCoOwnerSession = initiateFlow(it)
+                                recipientCoOwnerSession.send(ResponderRole.RECIPIENT)
+                                sessions += recipientCoOwnerSession
+                            }
+                        }
+
                         val fullySignedTx = subFlow(CollectSignaturesFlow(partSignedTx, sessions))
 
                         var observerSessions = listOf<FlowSession>()
-                        val lockerSession = initiateFlow(assetExchangeHTLCState.locker)
-                        lockerSession.send(ResponderRole.LOCKER)
-                        observerSessions += lockerSession
+                        // Add a session for each locker co-owner other than the submitter, for the shared assets
+                        assetExchangeHTLCState.lockers.forEach {
+                            if (!ourIdentity.equals(it)) {
+                                val lockerCoOwnerSession = initiateFlow(it)
+                                lockerCoOwnerSession.send(ResponderRole.LOCKER)
+                                observerSessions += lockerCoOwnerSession
+                            }
+                        }
                         
                         for (obs in observers) {
                             val obsSession = initiateFlow(obs)
@@ -466,6 +584,19 @@ object ClaimAssetHTLC {
                 println("Locker Received Tx: ${sTx} and recorded relevant states.")
                 println("Stored LinearId -> TxID mappign with Tx: ${storedTxStateTx}.")
                 return sTx
+            } else if (role == ResponderRole.RECIPIENT) {
+                val signTransactionFlow = object : SignTransactionFlow(session) {
+                    override fun checkTransaction(stx: SignedTransaction) = requireThat {
+                    }
+                }
+                try {
+                    val txId = subFlow(signTransactionFlow).id
+                    println("Recipient signed claim asset transaction.")
+                    return subFlow(ReceiveFinalityFlow(session, expectedTxId = txId))
+                } catch (e: Exception) {
+                    println("Error signing claim asset transaction by recipeint ($ourIdentity): ${e.message}\n")
+                    return subFlow(ReceiveFinalityFlow(session))
+                }
             } else if (role == ResponderRole.OBSERVER) {
                 val sTx = subFlow(ReceiveFinalityFlow(session, statesToRecord = StatesToRecord.ALL_VISIBLE))
                 println("Received Tx: ${sTx} and recorded states.")
@@ -492,7 +623,8 @@ object UnlockAssetHTLC {
             val contractId: String,
             val assetStateCreateCommand: CommandData,
             val issuer: Party,
-            val observers: List<Party> = listOf<Party>()
+            val observers: List<Party> = listOf<Party>(),
+            val coOwners: List<Party> = listOf<Party>()
     ) : FlowLogic<Either<Error, SignedTransaction>>() {
         /**
          * The call() method captures the logic to unlock an asset.
@@ -509,17 +641,31 @@ object UnlockAssetHTLC {
                 val assetExchangeHTLCState = it.state.data
                 println("Party: ${ourIdentity} UnlockAssetHTLC: ${assetExchangeHTLCState}")
                 val notary = it.state.notary
-                val unlockCmd = Command(AssetExchangeHTLCStateContract.Commands.Unlock(),
-                    listOf(
-                        assetExchangeHTLCState.locker.owningKey
-                    )
-                )
-                val assetCreateCmd = Command(assetStateCreateCommand, 
-                    setOf(
-                        assetExchangeHTLCState.locker.owningKey,
-                        issuer.owningKey
-                    ).toList()
-                )
+                var participantKeys: List<PublicKey> = listOf<PublicKey>()
+                for (member in assetExchangeHTLCState.lockers) {
+                    participantKeys += member.owningKey
+                }
+                val unlockCmd = Command(AssetExchangeHTLCStateContract.Commands.Unlock(), participantKeys)
+                var requiredSigners: List<PublicKey> = listOf<PublicKey>()
+                for (member in assetExchangeHTLCState.lockers) {
+                    requiredSigners += member.owningKey
+                }
+                requiredSigners += issuer.owningKey
+
+                var isTxSubmittedByReclaimCoOwner: Boolean = false
+                assetExchangeHTLCState.lockers.forEach {
+                    val member = it
+                    if (member.equals(ourIdentity)) {
+                        // transaction should be submitted by one of the reclaim co-owners only
+                        isTxSubmittedByReclaimCoOwner = true
+                    }
+                }
+                if ((assetExchangeHTLCState.lockers.size > 0) && (!isTxSubmittedByReclaimCoOwner)) {
+                    println("Transaction submitter ($ourIdentity) has to be one of the reclaim co-owners")
+                    throw Exception("Transaction submitter ($ourIdentity) has to be one of the reclaim co-owners")
+                }
+
+                val assetCreateCmd = Command(assetStateCreateCommand, requiredSigners)
                 
                 val reclaimAssetStateAndRef = assetExchangeHTLCState.assetStatePointer.resolve(serviceHub)
                 val reclaimAssetState = reclaimAssetStateAndRef.state.data
@@ -544,18 +690,24 @@ object UnlockAssetHTLC {
                     issuerSession.send(ResponderRole.ISSUER)
                     sessions += issuerSession
                 }
-                if (!ourIdentity.equals(assetExchangeHTLCState.locker)) {
-                    val lockerSession = initiateFlow(assetExchangeHTLCState.locker)
-                    lockerSession.send(ResponderRole.LOCKER)
-                    sessions += lockerSession
+
+                // Add a session for each reclaim co-owner other than the submitter, for the shared assets
+                assetExchangeHTLCState.lockers.forEach {
+                    if (!ourIdentity.equals(it)) {
+                        val lockerSession = initiateFlow(it)
+                        lockerSession.send(ResponderRole.LOCKER)
+                        sessions += lockerSession
+                    }
                 }
                 val fullySignedTx = subFlow(CollectSignaturesFlow(partSignedTx, sessions))
 
                 var observerSessions = listOf<FlowSession>()
-                if (!ourIdentity.equals(assetExchangeHTLCState.recipient) && !issuer.equals(assetExchangeHTLCState.recipient)) {
-                    val recipientSession = initiateFlow(assetExchangeHTLCState.recipient)
-                    recipientSession.send(ResponderRole.RECIPIENT)
-                    observerSessions += recipientSession
+                assetExchangeHTLCState.recipients.forEach {
+                    if (!ourIdentity.equals(it) && !issuer.equals(it)) {
+                        val recipientSession = initiateFlow(it)
+                        recipientSession.send(ResponderRole.RECIPIENT)
+                        observerSessions += recipientSession
+                    }
                 }
                 for (obs in observers) {
                     val obsSession = initiateFlow(obs)
@@ -594,7 +746,7 @@ object UnlockAssetHTLC {
                       val lTx = stx.tx.toLedgerTransaction(serviceHub)
                       "The input State must be AssetExchangeHTLCState" using (lTx.inputs[0].state.data is AssetExchangeHTLCState)
                       val htlcState = lTx.inputs.single().state.data as AssetExchangeHTLCState
-                      "I must be the locker" using (htlcState.locker == ourIdentity)
+                      "I must be the locker" using (htlcState.lockers.contains(ourIdentity))
                   }
               }
               try {

@@ -45,7 +45,7 @@ import java.util.Base64
  */
 @InitiatingFlow
 @StartableByRPC
-class CreateNetworkIdState(val networkId: String, val networkMembers: List<Party> = listOf<Party>()) : FlowLogic<SignedTransaction>() {
+class CreateNetworkIdState(val networkId: String, val networkMembers: List<Party>) : FlowLogic<SignedTransaction>() {
     /**
      * The progress tracker checkpoints each stage of the flow and outputs the specified messages when each
      * checkpoint is reached in the code. See the 'progressTracker.currentStep' expressions within the call() function.
@@ -100,7 +100,6 @@ class CreateNetworkIdState(val networkId: String, val networkMembers: List<Party
         // Stage 3.
         progressTracker.currentStep = SIGNING_TRANSACTION
         // Sign the transaction.
-        //val signedTx: SignedTransaction = serviceHub.signInitialTransaction(txBuilder)
         val partSignedTx: SignedTransaction = serviceHub.signInitialTransaction(txBuilder)
         println("Transaction submitter signed transaction.")
 
