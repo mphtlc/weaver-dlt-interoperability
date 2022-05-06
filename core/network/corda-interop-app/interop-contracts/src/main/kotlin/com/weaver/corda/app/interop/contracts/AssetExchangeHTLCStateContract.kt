@@ -18,6 +18,7 @@ import net.corda.core.transactions.LedgerTransaction
 import net.corda.core.crypto.sha256
 import java.time.Instant
 import java.util.*
+import java.security.PublicKey
 
 /**
  * AssetExchangeHTLCStateContract defines the rules for managing a [AssetExchangeHTLCState].
@@ -49,7 +50,7 @@ class AssetExchangeHTLCStateContract : Contract {
                 
                 // Check if owner is locker
                 val inputState = tx.inputs[0].state.data
-                "Locker must be the owner of asset" using inputState.participants.containsAll(listOf(htlcState.locker))
+                "Locker(s) must be the owner of asset" using inputState.participants.containsAll(htlcState.lockers)
                 
                 // Check if asset consumed in input is same as in HTLC State
                 val assetPointer = StaticPointer(tx.inputs[0].ref, tx.inputs[0].state.data.javaClass)
@@ -57,7 +58,7 @@ class AssetExchangeHTLCStateContract : Contract {
                 
                 // Check if both locker and recipient are signers
                 val participantKeys = htlcState.participants.map { it.owningKey }
-                "The required signers of the transaction must include locker and recipient." using (command.signers.containsAll(participantKeys))
+                "The required signers of the transaction must include locker(s) and recipient(s)." using (command.signers.containsAll(participantKeys))
             }
             is Commands.Claim -> requireThat {
                 "There should be one input state." using (tx.inputs.size == 1)
@@ -81,11 +82,14 @@ class AssetExchangeHTLCStateContract : Contract {
                 
                 // Check if owner is recipient
                 val outputState = tx.outputs[0].data
-                "Recipient must be the owner of asset" using outputState.participants.containsAll(listOf(htlcState.recipient))
+                "Recipient must be the owner of asset" using outputState.participants.containsAll(htlcState.recipients)
                 
                 // Verify if recipient is signer
-                val participantKeys = listOf(htlcState.recipient.owningKey)
-                "The required signers of the transaction must include recipient." using (command.signers.containsAll(participantKeys))
+                var participantKeys: List<PublicKey> = listOf<PublicKey>()
+                for (member in htlcState.recipients) {
+                    participantKeys += member.owningKey
+                }
+                "The required signers of the transaction must include recipient(s)." using (command.signers.containsAll(participantKeys))
             }
             is Commands.Unlock -> requireThat {
                 "There should be one input state." using (tx.inputs.size == 1)
@@ -101,11 +105,14 @@ class AssetExchangeHTLCStateContract : Contract {
                 
                 // Check if owner is locker
                 val outputState = tx.outputs[0].data
-                "Locker must be the owner of asset" using outputState.participants.containsAll(listOf(htlcState.locker))
+                "Locker must be the owner of asset" using outputState.participants.containsAll(htlcState.lockers)
                 
                 // Verify if locker is signer
-                val participantKeys = listOf(htlcState.locker.owningKey)
-                "The required signers of the transaction must include locker." using (command.signers.containsAll(participantKeys))
+                var participantKeys: List<PublicKey> = listOf<PublicKey>()
+                for (member in htlcState.lockers) {
+                    participantKeys += member.owningKey
+                }
+                "The required signers of the transaction must include locker(s)." using (command.signers.containsAll(participantKeys))
             }
         }
     }

@@ -79,6 +79,11 @@ const command: GluegunCommand = {
               'Param: AssetType:AssetId for Non-Fungible Assets \nFungibleAssetType:NumUnits for Fungible Assets \n(Required for steps 1-3)'
           },
           {
+            name: '--shared',
+            description:
+              'represents coowned/shared asset'
+          },
+          {
             name: '--debug',
             description:
               'Shows debug logs when running. Disabled by default. To enable --debug=true'
@@ -153,29 +158,69 @@ const command: GluegunCommand = {
       return
     }
 
-    const networkL = await fabricHelper({
-      channel: netConfig.channelName,
-      contractName: netConfig.chaincode,
-      connProfilePath: netConfig.connProfilePath,
-      networkName: options['target-network'],
-      mspId: netConfig.mspId,
-      userString: locker
-    })
+    let coOwnerCerts, networkL
+    if (options['shared'] && options['shared']=='true') {
+      const coOwners = locker.split(',')
+      coOwnerCerts = coOwners.map(element => element);
+      for (var sz = 0; sz < coOwners.length; sz++) {
+        networkL = await fabricHelper({
+          channel: netConfig.channelName,
+          contractName: netConfig.chaincode,
+          connProfilePath: netConfig.connProfilePath,
+          networkName: options['target-network'],
+          mspId: netConfig.mspId,
+          userString: coOwners[sz]
+        })
+        var coOwner = await networkL.wallet.get(coOwners[sz])
+        coOwnerCerts[sz] = Buffer.from((coOwner).credentials.certificate).toString('base64')
+      }
+    }
 
-    const networkR = await fabricHelper({
-      channel: netConfig.channelName,
-      contractName: netConfig.chaincode,
-      connProfilePath: netConfig.connProfilePath,
-      networkName: options['target-network'],
-      mspId: netConfig.mspId,
-      userString: recipient
-    })
+    let newCoOwnerCerts, networkR
+    if (options['shared'] && options['shared']=='true') {
+      const newCoOwners = recipient.split(',')
+      newCoOwnerCerts = newCoOwners.map(element => element);
+      for (var sz = 0; sz < newCoOwners.length; sz++) {
+        networkR = await fabricHelper({
+          channel: netConfig.channelName,
+          contractName: netConfig.chaincode,
+          connProfilePath: netConfig.connProfilePath,
+          networkName: options['target-network'],
+          mspId: netConfig.mspId,
+          userString: newCoOwners[sz]
+        })
+        var newCoOwner = await networkR.wallet.get(newCoOwners[sz])
+        newCoOwnerCerts[sz] = Buffer.from((newCoOwner).credentials.certificate).toString('base64')
+      }
+    }
 
-    const lockerId = await networkL.wallet.get(locker)
-    const lockerCert = Buffer.from((lockerId).credentials.certificate).toString('base64')
+    let lockerId, lockerCert
+    if (!options['shared'] || options['shared'] != 'true') {
+        networkL = await fabricHelper({
+          channel: netConfig.channelName,
+          contractName: netConfig.chaincode,
+          connProfilePath: netConfig.connProfilePath,
+          networkName: options['target-network'],
+          mspId: netConfig.mspId,
+          userString: locker
+        })
+        lockerId = await networkL.wallet.get(locker)
+        lockerCert = Buffer.from((lockerId).credentials.certificate).toString('base64')
+    }
 
-    const recipientId = await networkR.wallet.get(recipient)
-    const recipientCert = Buffer.from((recipientId).credentials.certificate).toString('base64')
+    let recipientId, recipientCert
+    if (!options['shared'] || options['shared'] != 'true') {
+        networkR = await fabricHelper({
+          channel: netConfig.channelName,
+          contractName: netConfig.chaincode,
+          connProfilePath: netConfig.connProfilePath,
+          networkName: options['target-network'],
+          mspId: netConfig.mspId,
+          userString: recipient
+        })
+        recipientId = await networkR.wallet.get(recipient)
+        recipientCert = Buffer.from((recipientId).credentials.certificate).toString('base64')
+    }
 
     const spinner = print.spin(`Asset Exchange:\n`)
 
@@ -190,6 +235,30 @@ const command: GluegunCommand = {
           `Please provide a asset type and id in --param`
         )
         spinner.fail(`Error`)
+      } else if (options['shared'] && options['shared']=='true') {
+        try {
+          spinner.info(`Trying Shared Asset Lock: ${param1}, ${param2} by ${locker} for ${recipient}`)
+          var timeTaken="Lock Asset Time"
+          console.time(timeTaken)
+          res = await AssetManager.createSharedHTLC(networkL.contract,
+                          param1,
+                          param2,
+			  coOwnerCerts.join(','),
+                          newCoOwnerCerts.join(','),
+                          secret,
+                          hash_secret,
+                          timeout2,
+                          null)
+          console.timeEnd(timeTaken)
+          if (!res.result) {
+            throw new Error()
+          }
+          spinner.info(`Shared Asset Locked: ${res.result}, preimage: ${res.preimage}, hashvalue: ${hash_secret}`)
+          spinner.succeed('Shared Asset Exchange: Step 1 Complete.')
+        } catch(error) {
+            print.error(`Could not Lock Shared Asset in ${options['target-network']} ${error}`)
+            spinner.fail(`Error`)
+        }
       }
       else {
         try {
@@ -220,6 +289,23 @@ const command: GluegunCommand = {
           `Please provide a asset type and id in --param`
         )
         spinner.fail(`Error`)
+      } else if (options['shared'] && options['shared']=='true') {
+        try {
+          spinner.info(`Testing if shared asset is locked: ${param1}, ${param2} by ${locker} for ${recipient}`)
+          var timeTaken="IsLock Asset Time"
+          console.time(timeTaken)
+          res = await AssetManager.isSharedAssetLockedInHTLC(networkR.contract,
+                          param1,
+                          param2,
+                          newCoOwnerCerts.join(','),
+			  coOwnerCerts.join(','))
+          console.timeEnd(timeTaken)
+          spinner.info(`Is Shared Asset Locked Return: ${res}`)
+          spinner.succeed('Shared Asset Exchange: Step 2 Complete.')
+        } catch(error) {
+            print.error(`Could not call isSharedAssetLockedInHTLC in ${options['target-network']}`)
+            spinner.fail(`Error`)
+        }
       }
       else {
         try {
@@ -334,6 +420,27 @@ const command: GluegunCommand = {
           `Please provide the preimage in --secret`
         )
         spinner.fail(`Error`)
+      } else if (options['shared'] && options['shared']=='true') {
+        try {
+          spinner.info(`Trying Shared Asset Claim: ${param1} ${param2}`)
+          var timeTaken="Claim Asset Time"
+          console.time(timeTaken)
+          res = await AssetManager.claimSharedAssetInHTLC(networkR.contract,
+                          param1,
+                          param2,
+                          coOwnerCerts.join(','),
+			  newCoOwnerCerts.join(','),
+                          secret)
+          console.timeEnd(timeTaken)
+          if (!res) {
+            throw new Error()
+          }
+          spinner.info(`Shared Asset Claimed: ${res}`)
+          spinner.succeed('Shared Asset Exchange: All Steps Complete.')
+        } catch(error) {
+            print.error(`Could not claim shared asset in ${options['target-network']}`)
+            spinner.fail(`Error`)
+        }
       }
       else {
         try {
@@ -360,6 +467,25 @@ const command: GluegunCommand = {
           `Please provide a asset type and id in --param`
         )
         spinner.fail(`Error`)
+      } else if (options['shared'] && options['shared']=='true') {
+        try {
+          spinner.info(`Trying Shared Asset Unlock: ${param1} ${param2}`)
+          var timeTaken="ReClaim Asset Time"
+          console.time(timeTaken)
+          res = await AssetManager.reclaimSharedAssetInHTLC(networkL.contract,
+                                      param1,
+                                      param2,
+				      coOwnerCerts.join(','),
+                                      newCoOwnerCerts.join(','));
+          console.timeEnd(timeTaken)
+          if (!res) {
+            throw new Error()
+          }
+          spinner.succeed(`Shared Asset Reclaimed: ${res}`)
+        } catch(error) {
+            print.error(`Could not claim shared asset in ${options['target-network']}`)
+            spinner.fail(`Error`)
+        }
       }
       else {
         try {

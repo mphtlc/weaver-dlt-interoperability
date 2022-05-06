@@ -10,6 +10,7 @@ import arrow.core.*
 import co.paralleluniverse.fibers.Suspendable
 import com.weaver.corda.app.interop.contracts.AssetExchangeHTLCStateContract
 import com.weaver.corda.app.interop.states.AssetExchangeHTLCState
+import com.weaver.corda.app.interop.states.ObserversAndSigners
 import com.weaver.corda.app.interop.states.AssetLockHTLCData
 import com.weaver.corda.app.interop.states.AssetClaimHTLCData
 
@@ -46,14 +47,12 @@ import com.weaver.protos.common.asset_locks.AssetLocks
 @InitiatingFlow
 @StartableByRPC
 class LockAsset
-@JvmOverloads
 constructor(
         val assetLock: AssetLocks.AssetLock,
         val agreement: AssetLocks.AssetExchangeAgreement,
         val getAssetFlowName: String,
         val assetStateDeleteCommand: CommandData,
-        val issuer: Party,
-        val observers: List<Party> = listOf<Party>()
+        val observersAndSigners: ObserversAndSigners
 ) : FlowLogic<Either<Error, UniqueIdentifier>>() {
     /**
      * The call() method captures the logic to create a new [AssetExchangeHTLCState] state in the vault.
@@ -65,7 +64,12 @@ constructor(
      * @return Returns the contractId of the newly created [AssetExchangeHTLCState].
      */
     @Suspendable
-    override fun call(): Either<Error, UniqueIdentifier> = try {   
+    override fun call(): Either<Error, UniqueIdentifier> = try {
+
+        val issuer: Party = observersAndSigners.issuer
+        val observers: List<Party> = observersAndSigners.observers
+        val coOwners: List<Party> = observersAndSigners.coOwners
+
         if (assetLock.lockMechanism == AssetLocks.LockMechanism.HTLC) {
             val lockInfoHTLC = AssetLocks.AssetLockHTLC.parseFrom(
                 Base64.getDecoder().decode(assetLock.lockInfo.toByteArray())
@@ -98,23 +102,31 @@ constructor(
                     println("Error: Unable to Get Asset StateAndRef for type: ${agreement.type} and id: ${agreement.id}.")
                     Left(Error("Error: Unable to Get Asset StateAndRef for type: ${agreement.type} and id: ${agreement.id}."))
                 }
-                
-                // Resolve recipient name to party
-                val recipientName: CordaX500Name = CordaX500Name.parse(agreement.recipient)
-                val recipient = serviceHub.networkMapCache.getPeerByLegalName(recipientName)
-                
-                if (recipient == null) {
-                    println("Error: Unable to find recipient party: ${agreement.recipient}.")
-                    Left(Error("Error: Unable to find recipient party: ${agreement.recipient}."))
+
+                // Obtain the co-owner parties who are the recipients of the shared asset, who need to provide their signatures
+                var recipientCoOwners: List<Party> = listOf<Party>()
+                var recipientCoOwnerString = agreement.recipient
+                val recipientCoOwnerNames: Array<String> = recipientCoOwnerString!!.split(";").toTypedArray();
+                recipientCoOwnerNames.forEach {
+                    // Resolve recipient name to party
+                    val recipientName: CordaX500Name = CordaX500Name.parse(it)
+                    val recipient = serviceHub.networkMapCache.getPeerByLegalName(recipientName)
+                    
+                    if (recipient == null) {
+                        println("Error: Unable to find recipient party: ${it}.")
+                        Left(Error("Error: Unable to find recipient party: ${it}."))
+                    }
+                    recipientCoOwners += recipient!!
                 }
-                
+
                 subFlow(LockAssetHTLC.Initiator(
                     lockInfoData, 
                     assetRef!!,
                     assetStateDeleteCommand,
-                    recipient!!,
+                    recipientCoOwners,
                     issuer,
-                    observers
+                    observers,
+                    coOwners
                 ))
             })
             
@@ -136,14 +148,12 @@ constructor(
 @InitiatingFlow
 @StartableByRPC
 class LockFungibleAsset
-@JvmOverloads
 constructor(
         val assetLock: AssetLocks.AssetLock,
         val agreement: AssetLocks.FungibleAssetExchangeAgreement,
         val getAssetFlowName: String,
         val assetStateDeleteCommand: CommandData,
-        val issuer: Party,
-        val observers: List<Party> = listOf<Party>()
+        val observersAndSigners: ObserversAndSigners
 ) : FlowLogic<Either<Error, UniqueIdentifier>>() {
     /**
      * The call() method captures the logic to create a new [AssetExchangeHTLCState] state in the vault.
@@ -155,7 +165,12 @@ constructor(
      * @return Returns the contractId of the newly created [AssetExchangeHTLCState].
      */
     @Suspendable
-    override fun call(): Either<Error, UniqueIdentifier> = try {   
+    override fun call(): Either<Error, UniqueIdentifier> = try {
+
+        val issuer: Party = observersAndSigners.issuer
+        val observers: List<Party> = observersAndSigners.observers
+        val coOwners: List<Party> = observersAndSigners.coOwners
+
         if (assetLock.lockMechanism == AssetLocks.LockMechanism.HTLC) {
             val lockInfoHTLC = AssetLocks.AssetLockHTLC.parseFrom(
                 Base64.getDecoder().decode(assetLock.lockInfo.toByteArray())
@@ -188,23 +203,31 @@ constructor(
                     println("Error: Unable to Get Asset StateAndRef for type: ${agreement.type} and id: ${agreement.numUnits}.")
                     Left(Error("Error: Unable to Get Asset StateAndRef for type: ${agreement.type} and id: ${agreement.numUnits}."))
                 }
-                
-                // Resolve recipient name to party
-                val recipientName: CordaX500Name = CordaX500Name.parse(agreement.recipient)
-                val recipient = serviceHub.networkMapCache.getPeerByLegalName(recipientName)
-                
-                if (recipient == null) {
-                    println("Error: Unable to find recipient party: ${agreement.recipient}.")
-                    Left(Error("Error: Unable to find recipient party: ${agreement.recipient}."))
+
+                // Obtain the co-owner parties who are the recipients of the shared asset, who need to provide their signatures
+                var recipientCoOwners: List<Party> = listOf<Party>()
+                var recipientCoOwnerString = agreement.recipient
+                val recipientCoOwnerNames: Array<String> = recipientCoOwnerString!!.split(";").toTypedArray();
+                recipientCoOwnerNames.forEach {
+                    // Resolve recipient name to party
+                    val recipientName: CordaX500Name = CordaX500Name.parse(it)
+                    val recipient = serviceHub.networkMapCache.getPeerByLegalName(recipientName)
+
+                    if (recipient == null) {
+                        println("Error: Unable to find recipient party: ${it}.")
+                        Left(Error("Error: Unable to find recipient party: ${it}."))
+                    }
+                    recipientCoOwners += recipient!!
                 }
                 
                 subFlow(LockAssetHTLC.Initiator(
                     lockInfoData, 
                     assetRef!!,
                     assetStateDeleteCommand,
-                    recipient!!,
+                    recipientCoOwners,
                     issuer,
-                    observers
+                    observers,
+                    coOwners
                 ))
             })
             
@@ -228,14 +251,12 @@ constructor(
 @InitiatingFlow
 @StartableByRPC
 class ClaimAsset
-@JvmOverloads
 constructor(
         val contractId: String,
         val assetClaim: AssetLocks.AssetClaim,
         val assetStateCreateCommand: CommandData,
         val updateOwnerFlow: String,
-        val issuer: Party,
-        val observers: List<Party> = listOf<Party>()
+        val observersAndSigners: ObserversAndSigners
 ) : FlowLogic<Either<Error, SignedTransaction>>() {
     /**
      * The call() method captures the logic to claim the asset by revealing preimage.
@@ -244,6 +265,11 @@ constructor(
      */
     @Suspendable
     override fun call(): Either<Error, SignedTransaction> = try {
+
+        val issuer: Party = observersAndSigners.issuer
+        val observers: List<Party> = observersAndSigners.observers
+        val coOwners: List<Party> = observersAndSigners.coOwners
+
         if (assetClaim.lockMechanism == AssetLocks.LockMechanism.HTLC) {
             val claimInfoHTLC = AssetLocks.AssetClaimHTLC.parseFrom(
                 Base64.getDecoder().decode(assetClaim.claimInfo.toByteArray())
@@ -257,7 +283,8 @@ constructor(
                 assetStateCreateCommand,
                 updateOwnerFlow,
                 issuer,
-                observers
+                observers,
+                coOwners
             ))
         } else {
             println("Lock Mechanism not supported.")
@@ -278,12 +305,10 @@ constructor(
 @InitiatingFlow
 @StartableByRPC
 class UnlockAsset
-@JvmOverloads
 constructor(
         val contractId: String,
         val assetStateCreateCommand: CommandData,
-        val issuer: Party,
-        val observers: List<Party> = listOf<Party>()
+        val observersAndSigners: ObserversAndSigners
 ) : FlowLogic<Either<Error, SignedTransaction>>() {
     /**
      * The call() method captures the logic to unlock an asset.
@@ -292,11 +317,17 @@ constructor(
      */
     @Suspendable
     override fun call(): Either<Error, SignedTransaction> = try {
+
+        val issuer: Party = observersAndSigners.issuer
+        val observers: List<Party> = observersAndSigners.observers
+        val coOwners: List<Party> = observersAndSigners.coOwners
+
         subFlow(UnlockAssetHTLC.Initiator(
             contractId,
             assetStateCreateCommand,
             issuer,
-            observers
+            observers,
+            coOwners
         ))
     } catch (e: Exception) {
         println("Error unlocking: ${e.message}\n")

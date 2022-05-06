@@ -92,10 +92,20 @@ const addAssets = ({
     })
     const userId = await wallet.get(item[1]['owner'])
     const userCert = Buffer.from((userId).credentials.certificate).toString('base64')
+    const coOwners = item[1]['coOwners']
 
     if (ccType == 'bond') {
       currentQuery.ccFunc = 'CreateAsset'
       currentQuery.args = [...currentQuery.args, item[1]['assetType'], item[1]['id'], userCert, item[1]['issuer'], item[1]['facevalue'], item[1]['maturitydate']]
+    } else if (ccType == 'sharedBond') {
+      const userIds = coOwners.split(',')
+      const userCerts = userIds.map(element => element);
+      for (var sz = 0; sz < userIds.length; sz++) {
+	      var coOwner = await wallet.get(userIds[sz])
+	      userCerts[sz] = Buffer.from((coOwner).credentials.certificate).toString('base64')
+      }
+      currentQuery.ccFunc = 'CreateSharedAsset'
+      currentQuery.args = [...currentQuery.args, item[1]['assetType'], item[1]['id'], JSON.stringify(userCerts), item[1]['issuer'], item[1]['facevalue'], item[1]['maturitydate']]
     } else if (ccType == 'token') {
       currentQuery.ccFunc = 'IssueTokenAssets'
       currentQuery.args = [...currentQuery.args, item[1]['tokenassettype'], item[1]['numunits'], userCert]

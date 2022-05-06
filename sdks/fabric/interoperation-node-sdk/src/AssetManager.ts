@@ -157,6 +157,85 @@ const createHTLC = async (
 
 /**
  * First/second step of a Hashed Time Lock Contract
+ * - Lock a unique asset instance using a hash
+ **/
+const createSharedHTLC = async (
+    contract: Contract,
+    assetType: string,
+    assetID: string,
+    lockerECert: string,
+    recipientECert: string,
+    hashPreimage: string,
+    hashValue: string,
+    expiryTimeSecs: number,
+    timeoutCallback: (c: Contract, t: string, i: string, l: string, r: string, p: string, v: string) => any,
+): Promise<{ preimage: any; result: any }> => {
+
+    if (!contract)
+    {
+        logger.error("Contract handle not supplied");
+        return { preimage: "", result: false };
+    }
+    if (!assetType)
+    {
+        logger.error("Asset type not supplied");
+        return { preimage: "", result: false };
+    }
+    if (!assetID)
+    {
+        logger.error("Asset ID not supplied");
+        return { preimage: "", result: false };
+    }
+    if (!lockerECert)
+    {
+        logger.error("Locker(s) ECert not supplied");
+        return { preimage: "", result: false };
+    }
+    if (!recipientECert)
+    {
+        logger.error("Recipient ECert not supplied");
+        return { preimage: "", result: false };
+    }
+    const currTimeSecs = Math.floor(Date.now()/1000);   // Convert epoch milliseconds to seconds
+    if (expiryTimeSecs <= currTimeSecs)
+    {
+        logger.error("Supplied expiry time invalid or in the past: %s; current time: %s", new Date(expiryTimeSecs).toISOString(), new Date(currTimeSecs).toISOString());
+        return { preimage: "", result: false };
+    }
+
+    if (!hashValue || hashValue.length == 0)
+    {
+        if (!hashPreimage || hashPreimage.length == 0)
+        {
+            // Generate the preimage
+            hashPreimage = generateRandomHashPreimage(-1);
+        }
+        // Hash the preimage
+        hashValue = createSHA256HashBase64(hashPreimage);
+    }
+
+    const assetExchangeAgreementStr = createAssetExchangeAgreementSerialized(assetType, assetID, recipientECert, lockerECert);
+    const lockInfoStr = createAssetLockInfoSerialized(hashValue, expiryTimeSecs);
+
+    // Normal invoke function
+    const [result, submitError] = await helpers.handlePromise(
+        contract.submitTransaction("LockSharedAsset", assetExchangeAgreementStr, lockInfoStr),
+    );
+    if (submitError) {
+        throw new Error(`LockAsset submitTransaction Error: ${submitError}`);
+    }
+
+    if (timeoutCallback)
+    {
+        // Start timer for lock expiration
+        setTimeout(timeoutCallback, (expiryTimeSecs * 1000) - Date.now(), contract, assetType, assetID, lockerECert, recipientECert, hashPreimage, hashValue);
+    }
+
+    return { preimage: hashPreimage, result: result };
+};
+
+/**
+ * First/second step of a Hashed Time Lock Contract
  * - Lock a set of fungible assets using a hash
  **/
 const createFungibleHTLC = async (
@@ -275,6 +354,63 @@ const claimAssetInHTLC = async (
     );
     if (submitError) {
         throw new Error(`ClaimAsset submitTransaction Error: ${submitError}`);
+    }
+    return result;
+};
+
+/**
+ * Latter step of a Hashed Time Lock Contract
+ * - Claim a unique asset instance using a hash preimage
+ **/
+const claimSharedAssetInHTLC = async (
+    contract: Contract,
+    assetType: string,
+    assetID: string,
+    lockerECert: string,
+    recipientECert: string,
+    hashPreimage: string,
+): Promise<any> => {
+
+    if (!contract)
+    {
+        logger.error("Contract handle not supplied");
+        return false;
+    }
+    if (!assetType)
+    {
+        logger.error("Asset type not supplied");
+        return false;
+    }
+    if (!assetID)
+    {
+        logger.error("Asset ID not supplied");
+        return false;
+    }
+    if (!lockerECert)
+    {
+        logger.error("Locker ECert not supplied");
+        return false;
+    }
+    if (!recipientECert)
+    {
+        logger.error("Recipient ECert not supplied");
+        return false;
+    }
+    if (!hashPreimage)
+    {
+        logger.error("Hash Preimage not supplied");
+        return false;
+    }
+
+    const assetExchangeAgreementStr = createAssetExchangeAgreementSerialized(assetType, assetID, recipientECert, lockerECert);
+    const claimInfoStr = createAssetClaimInfoSerialized(hashPreimage);
+
+    // Normal invoke function
+    const [result, submitError] = await helpers.handlePromise(
+        contract.submitTransaction("ClaimSharedAsset", assetExchangeAgreementStr, claimInfoStr),
+    );
+    if (submitError) {
+        throw new Error(`ClaimSharedAsset submitTransaction Error: ${submitError}`);
     }
     return result;
 };
@@ -402,6 +538,56 @@ const reclaimAssetInHTLC = async (
 
 /**
  * Rollback step of a Hashed Time Lock Contract
+ * - Reclaim a unique asset instance
+ **/
+const reclaimSharedAssetInHTLC = async (
+    contract: Contract,
+    assetType: string,
+    assetID: string,
+    lockerECert: string,
+    recipientECert: string,
+): Promise<any> => {
+
+    if (!contract)
+    {
+        logger.error("Contract handle not supplied");
+        return false;
+    }
+    if (!assetType)
+    {
+        logger.error("Asset type not supplied");
+        return false;
+    }
+    if (!assetID)
+    {
+        logger.error("Asset ID not supplied");
+        return false;
+    }
+    if (!lockerECert)
+    {
+        logger.error("Locker ECert not supplied");
+        return false;
+    }
+    if (!recipientECert)
+    {
+        logger.error("Recipient ECert not supplied");
+        return false;
+    }
+
+    const assetExchangeAgreementStr = createAssetExchangeAgreementSerialized(assetType, assetID, recipientECert, lockerECert);
+
+    // Normal invoke function
+    const [result, submitError] = await helpers.handlePromise(
+        contract.submitTransaction("UnlockSharedAsset", assetExchangeAgreementStr),
+    );
+    if (submitError) {
+        throw new Error(`UnlockSharedAsset submitTransaction Error: ${submitError}`);
+    }
+    return result;
+};
+
+/**
+ * Rollback step of a Hashed Time Lock Contract
  * - Reclaim a unique asset instance using contractId
  **/
 const reclaimAssetInHTLCusingContractId = async (
@@ -503,6 +689,56 @@ const isAssetLockedInHTLC = async (
     // Normal invoke function
     const [result, evaluateError] = await helpers.handlePromise(
         contract.evaluateTransaction("IsAssetLocked", assetExchangeAgreementStr),
+    );
+    if (evaluateError) {
+        throw new Error(`IsAssetLocked evaluateTransaction Error: ${evaluateError}`);
+    }
+    return result;
+};
+
+/**
+ * Query the state of a Hashed Time Lock Contract
+ * - Determine if a unique asset instance is locked by a given party for another given party
+ **/
+const isSharedAssetLockedInHTLC = async (
+    contract: Contract,
+    assetType: string,
+    assetID: string,
+    recipientECert: string,
+    lockerECert: string,
+): Promise<any> => {
+
+    if (!contract)
+    {
+        logger.error("Contract handle not supplied");
+        return false;
+    }
+    if (!assetType)
+    {
+        logger.error("Asset type not supplied");
+        return false;
+    }
+    if (!assetID)
+    {
+        logger.error("Asset ID not supplied");
+        return false;
+    }
+    if (!recipientECert)
+    {
+        logger.error("Recipient ECert not supplied");
+        return false;
+    }
+    if (!lockerECert)
+    {
+        logger.error("Locker ECert not supplied");
+        return false;
+    }
+
+    const assetExchangeAgreementStr = createAssetExchangeAgreementSerialized(assetType, assetID, recipientECert, lockerECert);
+
+    // Normal invoke function
+    const [result, evaluateError] = await helpers.handlePromise(
+        contract.evaluateTransaction("IsSharedAssetLocked", assetExchangeAgreementStr),
     );
     if (evaluateError) {
         throw new Error(`IsAssetLocked evaluateTransaction Error: ${evaluateError}`);
@@ -845,14 +1081,18 @@ export {
     createAssetLockInfoSerialized,
     createAssetClaimInfoSerialized,
     createHTLC,
+    createSharedHTLC,
     createFungibleHTLC,
     claimAssetInHTLC,
+    claimSharedAssetInHTLC,
     claimAssetInHTLCusingContractId,
     claimFungibleAssetInHTLC,
     reclaimAssetInHTLC,
+    reclaimSharedAssetInHTLC,
     reclaimAssetInHTLCusingContractId,
     reclaimFungibleAssetInHTLC,
     isAssetLockedInHTLC,
+    isSharedAssetLockedInHTLC,
     isAssetLockedInHTLCqueryUsingContractId,
     isFungibleAssetLockedInHTLC,
     StartHTLCAssetLockListener,
