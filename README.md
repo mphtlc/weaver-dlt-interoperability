@@ -75,6 +75,73 @@ Prominent features in our future roadmap are:
 - Testing, experimentation, and evaluation frameworks, are implemented in the [tests](./tests) folder.
   * An extensible _testnet_ is implemented in the [tests/network-setups folder](./tests/network-setups) to spin up basic Fabric, Corda, and Besu networks, and test various cross-network operations.
 
+# TESTING ASSET EXCHANGE WITH CO-OWNERS
+We demonstrate asset exchange of a bond in a Fabric network
+`network1` with tokens on Corda network `Corda_Network`, where
+both the bond and tokens are shared/co-owned.
+`Alice` and `Bob` co-own a bond on `network1` while `PartyA` and
+`PartyB` co-own tokens in `Corda_Network`. Here `Alice` and `Bob` in `network1` correspond to `PartyA` (CORDA_PORT=10006) and
+`PartyB` (CORDA_PORT=10009) in `Corda_Network` respectively. `Alice’s`
+ownership of bond on Fabric network is transferred to `Bob` (i.e.,
+`Bob` will be the sole owner of the bond) in exchange for a transfer
+of `Bob’s` ownership of tokens on Corda network to `Alice` (i.e., `Alice` will be the sole owner of the tokens).
+## Creation of Shared bond asset on Fabric network
+Run the following:
+- Check the account balance for Alice:
+  ```bash
+  ./bin/fabric-cli chaincode invoke mychannel simplecoownedinteropasset GetMySharedAssets '[]' --local-network='network1' --user='alice'
+  ```
+- Create a shared asset with type `bond01` and id `a01` that will be
+owned by both `Bob` and `Alice`:
+  ```bash
+  ./bin/fabric-cli configure asset add --target-network='network1' --type='sharedBond' --data-file=./src/data/sharedassets.json
+  ```
+- Check the shared bond asset `bond01:a01` details:
+  ```bash
+  ./bin/fabric-cli chaincode invoke mychannel simplecoownedinteropasset ReadSharedAsset '["bond01", "a01", "false"]' --localnetwork='network1' --user='alice'
+  ```
+## Creation of Shared tokens on Corda network
+Run the following:
+- Create 5 shared tokens with type `t1` owned by both `PartyA` and `PartyB`
+  ```
+  ./clients/build/install/clients/bin/clients shared-fungible issue-asset 5 t1 --co-owners="O=PartyA, L=London, C=GB;O=PartyB, L=London, C=GB"
+  ```
+- Check the details of shared token asset `t1:5`
+  ```bash
+  ./clients/build/install/clients/bin/clients shared-fungible get-assets-by-type t1
+  ```
+## Exercising MPHTLC for asset exchange on shared assets
+Run the following:
+- One of `Alice` or `Bob` submits the shared bond asset lock in Fabric
+`network1` (note that only hash is used here, and its pre-image
+is not known to either of Alice or Bob at this stage):
+  ```bash
+  ./bin/fabric-cli asset exchange-step --step=1 −−timeout-duration=3600 −−locker='alice,bob' −−recipient='bob' −−hash='ivHErp1x4bJDKuRo6L5bApO/DdoyD/dG0mAZrzLZEIs=' −−target-network='network1' −−param='bond01:a01' −−shared=true
+  ```
+- Query if shared asset `bond01:a01` is locked in `network1`:
+  ```bash
+  ./bin/fabric-cli asset exchange-step −−step=2 −−locker='alice,bob' −−recipient='bob' −−target-network='network1' −−param='bond01:a01' −−shared=true
+  ```
+- Using the same hash from `network1`, `PartyB` submits lock on
+shared tokens in Corda `Corda_Network` (this collects signature
+from `Alice` as well to complete):
+  ```bash
+  CORDA_PORT=10009 ./clients/build/install/clients/bin/clients lock-asset −−fungible --hashBase64='ivHErp1x4bJDKuRo6L5bApO/DdoyD/dG0mAZrzLZEIs=' --timeout=3600 --recipient-coowners="O=PartyA,L=London,C=GB" --param='t1:5' --shared --co-owners ='O=PartyA, L=London, C=GB;O=PartyB, L=London, C=GB'
+  ```
+  * Remember the `<contract-id>` part of the output.
+- `PartyA` queries if shared tokens `t1:5` are locked in `Corda_Network` (use the same `<contract-id>` obtained above):
+  ```bash
+  CORDA_PORT=10006 ./clients/build/install/clients/bin/clients is-asset-locked --contract-id='<contract-id>'
+  ```
+- `PartyA` cliams and solely owns the shared tokens in `Corda_Network` by supplying the hash pre-image (note that both the parties realize the hash pre-image via the MPC computation by supplying their respective secrets):
+  ```bash
+  CORDA_PORT=10006 ./clients/build/install/clients/bin/clients claim-asset --secret='secrettext' --contract-id='<contract-id>' --shared
+  ```
+- Using the same hash pre-image, `Bob` claims and solely owns the shared bond asset in `network1`:
+  ```bash
+  ./bin/fabric-cli asset exchange-step --step=6 --recipient=bob --locker='alice,bob' --target-network='network1' --param='bond01:a01' --secret='secrettext' --shared=true
+  ```
+
 ## Active Maintainers
 - https://github.com/VRamakrishna
 - https://github.com/sanvenDev
